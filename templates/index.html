@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StockSeer — LSTM Price Predictor</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">📈</div>
+    Stock<span>Seer</span>
+  </div>
+  <div class="header-badge">LSTM · NEURAL NETWORK · REAL-TIME</div>
+</header>
+
+<!-- ── Main ── -->
+<main>
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>Predict Stock Prices<br>with <em>Deep Learning</em></h1>
+    <p>// LSTM · 60-day lookback · R² accuracy · Alpha Vantage + Yahoo Finance</p>
+  </div>
+
+  <!-- Search / Control card -->
+  <div class="search-card">
+    <div class="search-row">
+
+      <!-- Symbol input + autocomplete -->
+      <div class="search-wrap">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input
+          id="symbol-input"
+          type="text"
+          placeholder="Search symbol (e.g. AAPL, TSLA, NVDA)"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <div id="autocomplete"></div>
+      </div>
+
+      <!-- Predict button -->
+      <button id="predict-btn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.5">
+          <polygon points="5 3 19 12 5 21 5 3"/>
+        </svg>
+        Predict
+      </button>
+
+      <!-- Auto-refresh -->
+      <select id="refresh-select" class="refresh-select" title="Auto-refresh interval">
+        <option value="0">↺  Off</option>
+        <option value="1">↺  1 min</option>
+        <option value="5">↺  5 min</option>
+        <option value="15">↺  15 min</option>
+      </select>
+
+    </div>
+
+    <!-- Error box -->
+    <div id="error-box"></div>
+  </div>
+
+  <!-- Loading spinner -->
+  <div id="loading">
+    <div class="spinner"></div>
+    <p id="loading-msg">Training LSTM model — this may take ~30 seconds on first run…</p>
+  </div>
+
+  <!-- ── Results ── -->
+  <div id="results">
+
+    <!-- KPI grid -->
+    <div class="kpi-grid">
+
+      <!-- Current Price -->
+      <div class="kpi-card">
+        <div class="kpi-label">Current Price</div>
+        <div class="kpi-value" id="kpi-current">—</div>
+        <div class="kpi-sub" id="result-symbol"></div>
+      </div>
+
+      <!-- Predicted Price -->
+      <div class="kpi-card">
+        <div class="kpi-label">Predicted (Next Close)</div>
+        <div class="kpi-value" id="kpi-predicted">—</div>
+        <div class="kpi-sub">LSTM forecast</div>
+      </div>
+
+      <!-- Change % -->
+      <div class="kpi-card">
+        <div class="kpi-label">Expected Change</div>
+        <div class="kpi-value" id="kpi-change">—</div>
+        <div class="kpi-sub">vs current price</div>
+      </div>
+
+      <!-- Suggestion -->
+      <div class="kpi-card">
+        <div class="kpi-label">Recommendation</div>
+        <div style="margin-top:6px">
+          <span class="suggestion-badge" id="kpi-suggestion">—</span>
+        </div>
+        <div class="kpi-sub" style="margin-top:8px">based on predicted move</div>
+      </div>
+
+      <!-- Accuracy -->
+      <div class="kpi-card">
+        <div class="kpi-label">Model Accuracy (R²)</div>
+        <div class="kpi-value" id="kpi-accuracy">—</div>
+        <div class="accuracy-bar-wrap">
+          <div class="accuracy-bar-fill" id="accuracy-bar" style="width:0%"></div>
+        </div>
+        <div class="kpi-sub" style="margin-top:6px">R-squared on test set</div>
+      </div>
+
+      <!-- Data source -->
+      <div class="kpi-card">
+        <div class="kpi-label">Data Source</div>
+        <div style="margin-top:10px">
+          <span class="source-pill" id="data-source">
+            <span class="source-dot"></span>
+            —
+          </span>
+        </div>
+        <div class="kpi-sub" style="margin-top:8px">AV primary · YF fallback</div>
+      </div>
+
+    </div>
+
+    <!-- Chart -->
+    <div class="chart-card">
+      <div class="chart-header">
+        <div class="chart-title">Price History + Prediction</div>
+        <div class="chart-legend">
+          <span><span class="legend-dot" style="background:#00d4ff"></span>Historical</span>
+          <span><span class="legend-dot" style="background:#7c3aed"></span>Predicted</span>
+        </div>
+      </div>
+      <canvas id="price-chart"></canvas>
+    </div>
+
+  </div><!-- /results -->
+
+</main>
+
+<footer>
+  StockSeer · LSTM Neural Network · Alpha Vantage + Yahoo Finance ·
+  For educational purposes only — not financial advice.
+</footer>
+
+<script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
