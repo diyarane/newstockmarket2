@@ -74,7 +74,7 @@ def api_predict():
     if not symbol:
         return jsonify({"error": "Symbol is required"}), 400
     try:
-        result = predict_price(symbol)
+        result = predict_price(symbol, ensemble_method='bagging')
         # Remove accuracy_score from the response sent to frontend
         if 'accuracy_score' in result:
             del result['accuracy_score']
@@ -82,6 +82,21 @@ def api_predict():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+
+'''
+# For standard LSTM (default)
+result = predict_price(symbol, ensemble_method='standard')
+
+# For bagging ensemble (usually 2-3% better accuracy)
+result = predict_price(symbol, ensemble_method='bagging')
+
+# For hybrid LSTM + Gradient Boosting (best for trending stocks)
+result = predict_price(symbol, ensemble_method='hybrid')
+
+# For grid search optimized (slower but finds best params)
+result = predict_price(symbol, ensemble_method='grid_search')
+'''
 
 @app.route("/api/stock_data")
 def api_stock_data():

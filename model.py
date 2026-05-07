@@ -1,28 +1,27 @@
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from sklearn.preprocessing import MinMaxScaler, RobustScaler
-from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.ensemble import BaggingRegressor, RandomForestRegressor, GradientBoostingRegressor
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.metrics import mean_absolute_percentage_error
 import warnings
 warnings.filterwarnings('ignore')
 
 # Global cache
 trained_models = {}
 
-LOOKBACK = 50
-EPOCHS = 100
+LOOKBACK = 20
+EPOCHS = 15
 
-def fetch_stock_data(symbol, period="2y"):
-    """Fetch stock data with maximum features."""
-    print(f"  📡 Fetching data for {symbol}...")
-    
+def fetch_stock_data(symbol, period="6mo"):
+    """Fetch stock data."""
     ticker = yf.Ticker(symbol)
     df = ticker.history(period=period)
     
     if df.empty:
         raise ValueError(f"No data available for {symbol}")
     
-    # Create comprehensive features
     df = df.rename(columns={
         'Open': 'open',
         'High': 'high',
@@ -31,139 +30,41 @@ def fetch_stock_data(symbol, period="2y"):
         'Volume': 'volume'
     })
     
-    # Price-based features
-    df['returns'] = df['close'].pct_change()
-    df['log_returns'] = np.log1p(df['returns'])
-    df['high_low_ratio'] = (df['high'] - df['low']) / df['close']
-    df['open_close_ratio'] = (df['open'] - df['close']) / df['close']
-    
-    # Moving averages and crossovers
-    for period_ma in [5, 10, 20, 30, 50]:
-        df[f'ma_{period_ma}'] = df['close'].rolling(window=period_ma).mean()
-        df[f'ma_ratio_{period_ma}'] = df['close'] / df[f'ma_{period_ma}'] - 1
-    
-    # Exponential moving averages
-    for span in [12, 26]:
-        df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
-    
-    # MACD
-    df['macd'] = df['ema_12'] - df['ema_26']
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_histogram'] = df['macd'] - df['macd_signal']
-    
-    # RSI
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    
-    # Bollinger Bands
-    df['bb_middle'] = df['close'].rolling(window=20).mean()
-    bb_std = df['close'].rolling(window=20).std()
-    df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
-    df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
-    df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
-    
-    # Volume features
-    df['volume_ratio'] = df['volume'] / df['volume'].rolling(window=20).mean()
-    df['volume_price_trend'] = df['volume'] * df['returns']
-    df['obv'] = (np.sign(df['returns']) * df['volume']).cumsum()
-    
-    # Volatility
-    df['volatility'] = df['returns'].rolling(window=20).std()
-    df['atr'] = df['high'] - df['low']
-    df['atr'] = df['atr'].rolling(window=14).mean()
-    
-    # Price momentum
-    for period_mom in [5, 10, 20]:
-        df[f'momentum_{period_mom}'] = df['close'].pct_change(period_mom)
-    
-    # Lagged features (previous day's values)
-    for col in ['close', 'returns', 'volume', 'volatility']:
-        for lag in [1, 2, 3, 5]:
-            df[f'{col}_lag_{lag}'] = df[col].shift(lag)
-    
-    # Drop NaN values
-    df = df.dropna()
-    
-    print(f"  ✅ Retrieved {len(df)} days with {len(df.columns)} technical indicators")
     return df
 
 def prepare_lstm_data(df, lookback=LOOKBACK):
-    """Prepare sequences with multiple features."""
-    # Select best features for prediction
-    feature_cols = [
-        'close', 'returns', 'log_returns', 'high_low_ratio', 'open_close_ratio',
-        'ma_ratio_5', 'ma_ratio_10', 'ma_ratio_20', 'ma_ratio_30',
-        'macd', 'macd_signal', 'macd_histogram', 'rsi', 'bb_position',
-        'volume_ratio', 'volatility', 'momentum_5', 'momentum_10',
-        'close_lag_1', 'close_lag_2', 'returns_lag_1'
-    ]
+    """Prepare sequences for LSTM."""
+    prices = df["close"].values.reshape(-1, 1)
     
-    # Filter available columns
-    available_cols = [col for col in feature_cols if col in df.columns]
-    
-    print(f"  📊 Using {len(available_cols)} features for prediction")
-    
-    # Scale features
-    scaler_X = RobustScaler()
-    scaled_features = scaler_X.fit_transform(df[available_cols])
-    
-    # Target is next day's return
-    target = df['returns'].shift(-1).values[:-1]
-    scaled_features = scaled_features[:-1]
+    # Normalize
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaled = scaler.fit_transform(prices)
     
     # Create sequences
     X, y = [], []
-    for i in range(lookback, len(scaled_features)):
-        X.append(scaled_features[i - lookback:i, :])
-        y.append(target[i])
+    for i in range(lookback, len(scaled)):
+        X.append(scaled[i - lookback:i, 0])
+        y.append(scaled[i, 0])
     
-    X = np.array(X)
+    X = np.array(X).reshape(-1, lookback, 1)
     y = np.array(y)
     
-    return X, y, scaler_X, len(available_cols)
+    return X, y, scaler
 
-def build_lstm_model(input_shape, n_features):
-    """Build advanced LSTM model optimized for M4 Mac."""
+def build_lstm_model(lookback=LOOKBACK):
+    """Build LSTM model."""
     from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization, Bidirectional
-    from tensorflow.keras.optimizers import legacy  # Use legacy optimizer for M4
-    from tensorflow.keras.regularizers import l2
+    from tensorflow.keras.layers import LSTM, Dense, Dropout
     
     model = Sequential([
-        # First bidirectional LSTM layer
-        Bidirectional(LSTM(128, return_sequences=True, 
-                          input_shape=input_shape,
-                          kernel_regularizer=l2(0.0001))),
-        BatchNormalization(),
-        Dropout(0.3),
-        
-        # Second bidirectional LSTM layer
-        Bidirectional(LSTM(64, return_sequences=True,
-                          kernel_regularizer=l2(0.0001))),
-        BatchNormalization(),
-        Dropout(0.3),
-        
-        # Third LSTM layer
-        LSTM(32, return_sequences=False,
-             kernel_regularizer=l2(0.0001)),
-        BatchNormalization(),
+        LSTM(50, return_sequences=True, input_shape=(lookback, 1)),
         Dropout(0.2),
-        
-        # Dense layers
-        Dense(64, activation='relu', kernel_regularizer=l2(0.0001)),
+        LSTM(25, return_sequences=False),
         Dropout(0.2),
-        Dense(32, activation='relu'),
-        Dropout(0.1),
-        Dense(16, activation='relu'),
-        Dense(1, activation='tanh')
+        Dense(1)
     ])
     
-    optimizer = legacy.Adam(learning_rate=0.0005)
-    model.compile(optimizer=optimizer, loss='huber', metrics=['mae'])
-    
+    model.compile(optimizer='adam', loss='mean_squared_error')
     return model
 
 def calculate_directional_accuracy(y_true, y_pred):
@@ -171,75 +72,354 @@ def calculate_directional_accuracy(y_true, y_pred):
     if len(y_true) < 2:
         return 50.0
     
-    true_direction = np.sign(y_true)
-    pred_direction = np.sign(y_pred)
+    true_changes = np.diff(y_true.flatten())
+    pred_changes = np.diff(y_pred.flatten())
     
-    correct = np.sum(true_direction == pred_direction)
-    accuracy = (correct / len(y_true)) * 100
+    if len(true_changes) == 0:
+        return 50.0
+    
+    correct = np.sum((true_changes > 0) == (pred_changes > 0))
+    accuracy = (correct / len(true_changes)) * 100
     
     return accuracy
 
-def train_lstm(symbol):
-    """Train advanced LSTM model optimized for M4 Mac."""
-    symbol = symbol.upper()
+# ============================================================
+# METHOD 1: Bagging Ensemble with Multiple LSTM Models
+# ============================================================
+class BaggingLSTM:
+    """Bagging ensemble of multiple LSTM models."""
     
-    if symbol in trained_models:
-        print(f"  🔄 Using cached model for {symbol}")
-        return trained_models[symbol]
+    def __init__(self, n_estimators=5, lookback=LOOKBACK, epochs=EPOCHS):
+        self.n_estimators = n_estimators
+        self.lookback = lookback
+        self.epochs = epochs
+        self.models = []
+        self.scalers = []
+        
+    def train(self, X, y, scaler):
+        """Train multiple LSTM models on bootstrap samples."""
+        print(f"  🎯 Training Bagging Ensemble with {self.n_estimators} LSTM models...")
+        
+        n_samples = len(X)
+        self.models = []
+        self.scalers = [scaler]  # Store scaler once
+        
+        for i in range(self.n_estimators):
+            # Bootstrap sampling with replacement
+            indices = np.random.choice(n_samples, n_samples, replace=True)
+            X_bootstrap = X[indices]
+            y_bootstrap = y[indices]
+            
+            # Train LSTM model
+            model = build_lstm_model(self.lookback)
+            model.fit(X_bootstrap, y_bootstrap, epochs=self.epochs, batch_size=16, verbose=0)
+            self.models.append(model)
+            
+            print(f"    ✅ Trained estimator {i+1}/{self.n_estimators}")
+        
+        return self
     
-    print(f"\n{'='*50}")
-    print(f"  🚀 Training Advanced LSTM Model for {symbol}")
-    print(f"{'='*50}")
+    def predict(self, X):
+        """Average predictions from all models."""
+        predictions = []
+        for model in self.models:
+            pred = model.predict(X, verbose=0).flatten()
+            predictions.append(pred)
+        
+        # Return mean prediction
+        return np.mean(predictions, axis=0)
     
-    # Fetch data with features
-    df = fetch_stock_data(symbol)
+    def predict_single(self, X):
+        """Predict single sample with uncertainty."""
+        predictions = []
+        for model in self.models:
+            pred = model.predict(X, verbose=0).flatten()
+            predictions.append(pred[0])
+        
+        return np.mean(predictions), np.std(predictions)
+
+# ============================================================
+# METHOD 2: Hybrid LSTM + Random Forest / Gradient Boosting
+# ============================================================
+def extract_lstm_features(X, lstm_model):
+    """Extract features from LSTM intermediate layers."""
+    from tensorflow.keras.models import Model
     
-    if len(df) < LOOKBACK + 100:
-        raise ValueError(f"Insufficient data for {symbol}. Need at least {LOOKBACK + 100} days.")
-    
-    # Prepare data
-    X, y, scaler_X, n_features = prepare_lstm_data(df)
-    
-    if len(X) == 0:
-        raise ValueError("Not enough data after preprocessing")
-    
-    # Train final model on all data
-    print(f"  🧠 Training final model on {len(X)} sequences...")
-    final_model = build_lstm_model((LOOKBACK, n_features), n_features)
-    
-    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-    
-    early_stop = EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True)
-    reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
-    
-    history = final_model.fit(
-        X, y,
-        epochs=EPOCHS,
-        batch_size=32,
-        validation_split=0.15,
-        callbacks=[early_stop, reduce_lr],
-        verbose=1  # Show progress so you can see it's working
+    # Create feature extractor (output of second LSTM layer)
+    feature_extractor = Model(
+        inputs=lstm_model.input,
+        outputs=lstm_model.layers[2].output  # Second LSTM layer output
     )
     
-    # Calculate final accuracy
-    y_pred_final = final_model.predict(X, verbose=0).flatten()
-    final_accuracy = calculate_directional_accuracy(y, y_pred_final)
+    features = feature_extractor.predict(X, verbose=0)
+    return features
+
+def train_hybrid_model(symbol):
+    """Train LSTM + Gradient Boosting ensemble."""
+    symbol = symbol.upper()
     
-    print(f"\n✅ Model Performance for {symbol}:")
-    print(f"  • Directional Accuracy: {final_accuracy:.1f}%")
-    print(f"  • Best Validation Loss: {min(history.history['val_loss']):.4f}")
+    print(f"\n{'='*50}")
+    print(f"  🚀 Training HYBRID Ensemble for {symbol}")
+    print(f"{'='*50}")
+    
+    # Fetch and prepare data
+    df = fetch_stock_data(symbol)
+    X, y, scaler = prepare_lstm_data(df)
+    
+    # Split data
+    split = int(len(X) * 0.8)
+    X_train, X_test = X[:split], X[split:]
+    y_train, y_test = y[:split], y[split:]
+    
+    # First, train base LSTM
+    print(f"  🧠 Training base LSTM model...")
+    base_lstm = build_lstm_model()
+    base_lstm.fit(X_train, y_train, epochs=EPOCHS, batch_size=16, verbose=0)
+    
+    # Extract features using LSTM
+    print(f"  🔍 Extracting LSTM features for ensemble...")
+    X_train_features = extract_lstm_features(X_train, base_lstm)
+    X_test_features = extract_lstm_features(X_test, base_lstm)
+    
+    # Train Gradient Boosting on LSTM features
+    print(f"  🌲 Training Gradient Boosting on extracted features...")
+    gb_model = GradientBoostingRegressor(
+        n_estimators=100,
+        max_depth=5,
+        learning_rate=0.1,
+        random_state=42
+    )
+    gb_model.fit(X_train_features, y_train)
+    
+    # Make predictions
+    y_pred_gb = gb_model.predict(X_test_features)
+    y_pred_lstm = base_lstm.predict(X_test, verbose=0).flatten()
+    
+    # Ensemble: weighted average (70% LSTM, 30% GB)
+    y_pred_ensemble = (0.7 * y_pred_lstm) + (0.3 * y_pred_gb)
+    
+    # Calculate accuracy
+    y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1))
+    y_pred_real = scaler.inverse_transform(y_pred_ensemble.reshape(-1, 1))
+    accuracy = calculate_directional_accuracy(y_test_real, y_pred_real)
+    mape = mean_absolute_percentage_error(y_test_real, y_pred_real) * 100
+    
+    print(f"\n✅ Hybrid Ensemble Performance:")
+    print(f"  • Directional Accuracy: {accuracy:.1f}%")
+    print(f"  • MAPE: {mape:.1f}%")
     print(f"{'='*50}\n")
     
-    result = (final_model, scaler_X, df, final_accuracy, n_features)
-    trained_models[symbol] = result
+    return base_lstm, gb_model, scaler, df, accuracy
+
+# ============================================================
+# METHOD 3: Time Series Cross Validation with Grid Search
+# ============================================================
+def grid_search_lstm_params(symbol):
+    """Grid search for optimal LSTM hyperparameters."""
+    symbol = symbol.upper()
+    
+    print(f"\n{'='*50}")
+    print(f"  🔍 Grid Search for {symbol}")
+    print(f"{'='*50}")
+    
+    # Fetch data
+    df = fetch_stock_data(symbol)
+    X, y, scaler = prepare_lstm_data(df)
+    
+    # Parameter grid
+    param_grid = {
+        'lstm_units': [32, 64, 128],
+        'dropout_rate': [0.1, 0.2, 0.3],
+        'epochs': [10, 15, 20],
+        'batch_size': [16, 32]
+    }
+    
+    best_accuracy = 0
+    best_params = {}
+    results = []
+    
+    # Time series cross validation
+    tscv = TimeSeriesSplit(n_splits=3)
+    
+    from itertools import product
+    
+    total_combinations = len(param_grid['lstm_units']) * len(param_grid['dropout_rate']) * len(param_grid['epochs']) * len(param_grid['batch_size'])
+    print(f"  📊 Testing {total_combinations} parameter combinations...")
+    
+    combo_count = 0
+    for units, dropout_rate, epochs, batch_size in product(
+        param_grid['lstm_units'],
+        param_grid['dropout_rate'],
+        param_grid['epochs'],
+        param_grid['batch_size']
+    ):
+        combo_count += 1
+        print(f"    Testing {combo_count}/{total_combinations}...", end='\r')
+        
+        fold_accuracies = []
+        
+        for train_idx, val_idx in tscv.split(X):
+            X_train, X_val = X[train_idx], X[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
+            
+            # Build model with current parameters
+            from tensorflow.keras.models import Sequential
+            from tensorflow.keras.layers import LSTM, Dense, Dropout
+            
+            model = Sequential([
+                LSTM(units, return_sequences=True, input_shape=(LOOKBACK, 1)),
+                Dropout(dropout_rate),
+                LSTM(units // 2, return_sequences=False),
+                Dropout(dropout_rate),
+                Dense(1)
+            ])
+            model.compile(optimizer='adam', loss='mse')
+            
+            # Train
+            model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
+            
+            # Evaluate
+            y_pred = model.predict(X_val, verbose=0).flatten()
+            y_val_real = scaler.inverse_transform(y_val.reshape(-1, 1))
+            y_pred_real = scaler.inverse_transform(y_pred.reshape(-1, 1))
+            accuracy = calculate_directional_accuracy(y_val_real, y_pred_real)
+            fold_accuracies.append(accuracy)
+        
+        mean_accuracy = np.mean(fold_accuracies)
+        results.append((mean_accuracy, units, dropout_rate, epochs, batch_size))
+        
+        if mean_accuracy > best_accuracy:
+            best_accuracy = mean_accuracy
+            best_params = {
+                'lstm_units': units,
+                'dropout_rate': dropout_rate,
+                'epochs': epochs,
+                'batch_size': batch_size
+            }
+    
+    print(f"\n\n✅ Grid Search Complete!")
+    print(f"  • Best Accuracy: {best_accuracy:.1f}%")
+    print(f"  • Best Parameters: {best_params}")
+    print(f"{'='*50}\n")
+    
+    return best_params, best_accuracy
+
+# ============================================================
+# MAIN TRAINING FUNCTION (Choose your method)
+# ============================================================
+
+def train_lstm(symbol, ensemble_method='bagging'):
+    """
+    Train LSTM model with ensemble methods.
+    
+    Methods:
+    - 'standard': Regular LSTM
+    - 'bagging': Bagging ensemble of multiple LSTMs
+    - 'hybrid': LSTM + Gradient Boosting
+    - 'grid_search': Find best parameters first
+    """
+    symbol = symbol.upper()
+    
+    cache_key = f"{symbol}_{ensemble_method}"
+    if cache_key in trained_models:
+        print(f"  🔄 Using cached model for {symbol} ({ensemble_method})")
+        return trained_models[cache_key]
+    
+    print(f"\n{'='*50}")
+    print(f"  🚀 Training {ensemble_method.upper()} model for {symbol}")
+    print(f"{'='*50}")
+    
+    # Fetch data
+    df = fetch_stock_data(symbol)
+    print(f"  ✅ Retrieved {len(df)} days of data")
+    
+    if len(df) < LOOKBACK + 20:
+        raise ValueError(f"Insufficient data for {symbol}")
+    
+    # Prepare data
+    X, y, scaler = prepare_lstm_data(df)
+    
+    # Split data
+    split = int(len(X) * 0.8)
+    X_train, X_test = X[:split], X[split:]
+    y_train, y_test = y[:split], y[split:]
+    
+    if ensemble_method == 'standard':
+        # Standard LSTM
+        print(f"  🧠 Training standard LSTM...")
+        model = build_lstm_model()
+        model.fit(X_train, y_train, epochs=EPOCHS, batch_size=16, validation_split=0.1, verbose=1)
+        predictions = model.predict(X_test, verbose=0).flatten()
+        result_model = model
+        
+    elif ensemble_method == 'bagging':
+        # Bagging ensemble
+        bagging = BaggingLSTM(n_estimators=5)
+        bagging.train(X_train, y_train, scaler)
+        predictions = bagging.predict(X_test)
+        result_model = bagging
+        
+    elif ensemble_method == 'hybrid':
+        # Hybrid LSTM + Gradient Boosting
+        base_lstm = build_lstm_model()
+        base_lstm.fit(X_train, y_train, epochs=EPOCHS, batch_size=16, verbose=0)
+        
+        X_train_features = extract_lstm_features(X_train, base_lstm)
+        X_test_features = extract_lstm_features(X_test, base_lstm)
+        
+        gb_model = GradientBoostingRegressor(n_estimators=100, max_depth=5, random_state=42)
+        gb_model.fit(X_train_features, y_train)
+        
+        y_pred_lstm = base_lstm.predict(X_test, verbose=0).flatten()
+        y_pred_gb = gb_model.predict(X_test_features)
+        predictions = (0.7 * y_pred_lstm) + (0.3 * y_pred_gb)
+        result_model = (base_lstm, gb_model)
+        
+    elif ensemble_method == 'grid_search':
+        # First run grid search
+        best_params, _ = grid_search_lstm_params(symbol)
+        
+        # Train with best parameters
+        print(f"  🧠 Training with optimal parameters...")
+        from tensorflow.keras.models import Sequential
+        from tensorflow.keras.layers import LSTM, Dense, Dropout
+        
+        model = Sequential([
+            LSTM(best_params['lstm_units'], return_sequences=True, input_shape=(LOOKBACK, 1)),
+            Dropout(best_params['dropout_rate']),
+            LSTM(best_params['lstm_units'] // 2, return_sequences=False),
+            Dropout(best_params['dropout_rate']),
+            Dense(1)
+        ])
+        model.compile(optimizer='adam', loss='mse')
+        model.fit(X_train, y_train, epochs=best_params['epochs'], batch_size=best_params['batch_size'], verbose=1)
+        predictions = model.predict(X_test, verbose=0).flatten()
+        result_model = model
+    
+    else:
+        raise ValueError(f"Unknown method: {ensemble_method}")
+    
+    # Calculate accuracy
+    y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1))
+    y_pred_real = scaler.inverse_transform(predictions.reshape(-1, 1))
+    accuracy = calculate_directional_accuracy(y_test_real, y_pred_real)
+    mape = mean_absolute_percentage_error(y_test_real, y_pred_real) * 100
+    
+    print(f"\n✅ Model Performance for {symbol} ({ensemble_method}):")
+    print(f"  • Directional Accuracy: {accuracy:.1f}%")
+    print(f"  • MAPE: {mape:.1f}%")
+    print(f"{'='*50}\n")
+    
+    result = (result_model, scaler, df, accuracy)
+    trained_models[cache_key] = result
     return result
 
-def predict_price(symbol):
-    """Predict next day's price movement."""
+def predict_price(symbol, ensemble_method='standard'):
+    """Predict next day's price using specified ensemble method."""
     symbol = symbol.upper()
     
     try:
-        model, scaler_X, df, accuracy, n_features = train_lstm(symbol)
+        model, scaler, df, accuracy = train_lstm(symbol, ensemble_method)
     except Exception as e:
         print(f"Error: {e}")
         return {
@@ -248,41 +428,43 @@ def predict_price(symbol):
             "current_price": 0,
             "change_percent": 0,
             "suggestion": "ERROR",
-            "accuracy_score": 0,
             "data_source_used": "Failed to train",
             "historical_prices": [],
             "dates": [],
         }
     
-    # Prepare features for prediction
-    feature_cols = [
-        'close', 'returns', 'log_returns', 'high_low_ratio', 'open_close_ratio',
-        'ma_ratio_5', 'ma_ratio_10', 'ma_ratio_20', 'ma_ratio_30',
-        'macd', 'macd_signal', 'macd_histogram', 'rsi', 'bb_position',
-        'volume_ratio', 'volatility', 'momentum_5', 'momentum_10',
-        'close_lag_1', 'close_lag_2', 'returns_lag_1'
-    ]
-    
-    available_cols = [col for col in feature_cols if col in df.columns]
-    
     # Get last LOOKBACK days
-    last_sequence = df[available_cols].tail(LOOKBACK).values
-    last_scaled = scaler_X.transform(last_sequence)
-    last_scaled = last_scaled.reshape(1, LOOKBACK, n_features)
+    last_sequence = df["close"].values[-LOOKBACK:].reshape(-1, 1)
+    last_scaled = scaler.transform(last_sequence)
+    last_scaled = last_scaled.reshape(1, LOOKBACK, 1)
     
-    # Predict next day's return
-    predicted_return = float(model.predict(last_scaled, verbose=0)[0][0])
+    # Make prediction based on model type
+    if isinstance(model, BaggingLSTM):
+        pred_mean, pred_std = model.predict_single(last_scaled)
+        predicted_price = float(scaler.inverse_transform([[pred_mean]])[0][0])
+    elif isinstance(model, tuple):
+        # Hybrid model
+        base_lstm, gb_model = model
+        # Extract features and predict
+        from tensorflow.keras.models import Model
+        feature_extractor = Model(inputs=base_lstm.input, outputs=base_lstm.layers[2].output)
+        lstm_features = feature_extractor.predict(last_scaled, verbose=0)
+        pred_lstm = base_lstm.predict(last_scaled, verbose=0).flatten()[0]
+        pred_gb = gb_model.predict(lstm_features)[0]
+        predicted_price = float(scaler.inverse_transform([[(0.7 * pred_lstm + 0.3 * pred_gb)]])[0][0])
+    else:
+        # Standard LSTM
+        pred_scaled = model.predict(last_scaled, verbose=0)
+        predicted_price = float(scaler.inverse_transform(pred_scaled)[0][0])
+    
     current_price = float(df["close"].iloc[-1])
-    
-    # Convert return to price
-    predicted_price = current_price * (1 + predicted_return)
-    change_percent = predicted_return * 100
+    change_percent = ((predicted_price - current_price) / current_price) * 100
     
     # Generate suggestion
-    if change_percent > 1:
-        suggestion = "STRONG BUY" if change_percent > 2 else "BUY"
-    elif change_percent < -1:
-        suggestion = "STRONG SELL" if change_percent < -2 else "SELL"
+    if change_percent > 1.5:
+        suggestion = "BUY"
+    elif change_percent < -1.5:
+        suggestion = "SELL"
     else:
         suggestion = "HOLD"
     
@@ -297,8 +479,7 @@ def predict_price(symbol):
         "current_price": round(current_price, 2),
         "change_percent": round(change_percent, 2),
         "suggestion": suggestion,
-        "accuracy_score": round(accuracy, 1),
-        "data_source_used": "Yahoo Finance (Advanced LSTM)",
+        "data_source_used": f"Yahoo Finance (LSTM-{ensemble_method})",
         "historical_prices": historical_prices,
         "dates": dates,
     }
