@@ -107,7 +107,7 @@ async function runPredict() {
   }
 }
 
-// ── Render results ──
+// ── Render results (without accuracy) ──
 function renderResults(d) {
   // KPIs
   set('kpi-current',   `$${fmt(d.current_price)}`);
@@ -122,11 +122,6 @@ function renderResults(d) {
   const badge = document.getElementById('kpi-suggestion');
   badge.textContent = d.suggestion;
   badge.className   = `suggestion-badge ${d.suggestion}`;
-
-  // Accuracy
-  set('kpi-accuracy', `${d.accuracy_score}%`);
-  const bar = document.getElementById('accuracy-bar');
-  setTimeout(() => { bar.style.width = `${d.accuracy_score}%`; }, 80);
 
   // Data source
   const pill = document.getElementById('data-source');

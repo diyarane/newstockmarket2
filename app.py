@@ -75,6 +75,9 @@ def api_predict():
         return jsonify({"error": "Symbol is required"}), 400
     try:
         result = predict_price(symbol)
+        # Remove accuracy_score from the response sent to frontend
+        if 'accuracy_score' in result:
+            del result['accuracy_score']
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
