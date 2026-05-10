@@ -14,6 +14,36 @@ trained_models = {}
 LOOKBACK = 20
 EPOCHS = 15
 
+# Realistic daily volatility caps (percentage)
+# Most stable stocks move 0.5-2% on normal days
+VOLATILITY_LIMITS = {
+    'DEFAULT': 2.0,     # 2% max daily move for most stocks
+    'AAPL': 1.8,        # Apple typically moves 0.5-1.5%
+    'MSFT': 1.8,        # Microsoft stable
+    'GOOGL': 1.8,       # Google stable
+    'META': 2.2,        # Meta slightly more volatile
+    'AMZN': 2.2,        # Amazon moderate
+    'NVDA': 2.5,        # NVIDIA more volatile
+    'TSLA': 3.0,        # Tesla most volatile but capped
+    'JPM': 1.8,         # Banks stable
+    'V': 1.5,           # Visa very stable
+    'JNJ': 1.5,         # Johnson & Johnson very stable
+    'PG': 1.5,          # Procter & Gamble very stable
+    'WMT': 1.5,         # Walmart stable
+    'KO': 1.5,          # Coca-Cola very stable
+    'PEP': 1.5,         # Pepsi very stable
+    'COST': 1.8,        # Costco stable
+    'HD': 1.8,          # Home Depot stable
+    'DIS': 2.0,         # Disney
+    'NFLX': 2.5,        # Netflix
+    'ADBE': 2.0,        # Adobe
+    'CRM': 2.0,         # Salesforce
+    'INTC': 2.0,        # Intel
+    'AMD': 2.5,         # AMD
+    'BA': 2.5,          # Boeing
+    'UBER': 2.5,        # Uber
+}
+
 def fetch_stock_data(symbol, period="6mo"):
     """Fetch stock data."""
     ticker = yf.Ticker(symbol)
@@ -33,12 +63,22 @@ def fetch_stock_data(symbol, period="6mo"):
     return df
 
 def prepare_lstm_data(df, lookback=LOOKBACK):
-    """Prepare sequences for LSTM."""
+    """Prepare sequences for LSTM with realistic caps."""
     prices = df["close"].values.reshape(-1, 1)
     
-    # Normalize
+    # Calculate daily returns and cap to realistic ranges
+    returns = np.diff(prices.flatten()) / prices[:-1].flatten()
+    # Cap at 2.5% for training - prevents learning extreme moves
+    capped_returns = np.clip(returns, -0.025, 0.025)
+    
+    # Reconstruct prices with capped returns
+    capped_prices = prices.copy()
+    for i in range(1, len(capped_prices)):
+        capped_prices[i] = capped_prices[i-1] * (1 + capped_returns[i-1])
+    
+    # Normalize capped prices
     scaler = MinMaxScaler(feature_range=(0, 1))
-    scaled = scaler.fit_transform(prices)
+    scaled = scaler.fit_transform(capped_prices)
     
     # Create sequences
     X, y = [], []
@@ -102,15 +142,13 @@ class BaggingLSTM:
         
         n_samples = len(X)
         self.models = []
-        self.scalers = [scaler]  # Store scaler once
+        self.scalers = [scaler]
         
         for i in range(self.n_estimators):
-            # Bootstrap sampling with replacement
             indices = np.random.choice(n_samples, n_samples, replace=True)
             X_bootstrap = X[indices]
             y_bootstrap = y[indices]
             
-            # Train LSTM model
             model = build_lstm_model(self.lookback)
             model.fit(X_bootstrap, y_bootstrap, epochs=self.epochs, batch_size=16, verbose=0)
             self.models.append(model)
@@ -126,7 +164,6 @@ class BaggingLSTM:
             pred = model.predict(X, verbose=0).flatten()
             predictions.append(pred)
         
-        # Return mean prediction
         return np.mean(predictions, axis=0)
     
     def predict_single(self, X):
@@ -145,10 +182,9 @@ def extract_lstm_features(X, lstm_model):
     """Extract features from LSTM intermediate layers."""
     from tensorflow.keras.models import Model
     
-    # Create feature extractor (output of second LSTM layer)
     feature_extractor = Model(
         inputs=lstm_model.input,
-        outputs=lstm_model.layers[2].output  # Second LSTM layer output
+        outputs=lstm_model.layers[2].output
     )
     
     features = feature_extractor.predict(X, verbose=0)
@@ -162,26 +198,21 @@ def train_hybrid_model(symbol):
     print(f"  🚀 Training HYBRID Ensemble for {symbol}")
     print(f"{'='*50}")
     
-    # Fetch and prepare data
     df = fetch_stock_data(symbol)
     X, y, scaler = prepare_lstm_data(df)
     
-    # Split data
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
     
-    # First, train base LSTM
     print(f"  🧠 Training base LSTM model...")
     base_lstm = build_lstm_model()
     base_lstm.fit(X_train, y_train, epochs=EPOCHS, batch_size=16, verbose=0)
     
-    # Extract features using LSTM
     print(f"  🔍 Extracting LSTM features for ensemble...")
     X_train_features = extract_lstm_features(X_train, base_lstm)
     X_test_features = extract_lstm_features(X_test, base_lstm)
     
-    # Train Gradient Boosting on LSTM features
     print(f"  🌲 Training Gradient Boosting on extracted features...")
     gb_model = GradientBoostingRegressor(
         n_estimators=100,
@@ -191,14 +222,10 @@ def train_hybrid_model(symbol):
     )
     gb_model.fit(X_train_features, y_train)
     
-    # Make predictions
     y_pred_gb = gb_model.predict(X_test_features)
     y_pred_lstm = base_lstm.predict(X_test, verbose=0).flatten()
-    
-    # Ensemble: weighted average (70% LSTM, 30% GB)
     y_pred_ensemble = (0.7 * y_pred_lstm) + (0.3 * y_pred_gb)
     
-    # Calculate accuracy
     y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1))
     y_pred_real = scaler.inverse_transform(y_pred_ensemble.reshape(-1, 1))
     accuracy = calculate_directional_accuracy(y_test_real, y_pred_real)
@@ -222,11 +249,9 @@ def grid_search_lstm_params(symbol):
     print(f"  🔍 Grid Search for {symbol}")
     print(f"{'='*50}")
     
-    # Fetch data
     df = fetch_stock_data(symbol)
     X, y, scaler = prepare_lstm_data(df)
     
-    # Parameter grid
     param_grid = {
         'lstm_units': [32, 64, 128],
         'dropout_rate': [0.1, 0.2, 0.3],
@@ -238,7 +263,6 @@ def grid_search_lstm_params(symbol):
     best_params = {}
     results = []
     
-    # Time series cross validation
     tscv = TimeSeriesSplit(n_splits=3)
     
     from itertools import product
@@ -262,7 +286,6 @@ def grid_search_lstm_params(symbol):
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
             
-            # Build model with current parameters
             from tensorflow.keras.models import Sequential
             from tensorflow.keras.layers import LSTM, Dense, Dropout
             
@@ -275,10 +298,8 @@ def grid_search_lstm_params(symbol):
             ])
             model.compile(optimizer='adam', loss='mse')
             
-            # Train
             model.fit(X_train, y_train, epochs=epochs, batch_size=batch_size, verbose=0)
             
-            # Evaluate
             y_pred = model.predict(X_val, verbose=0).flatten()
             y_val_real = scaler.inverse_transform(y_val.reshape(-1, 1))
             y_pred_real = scaler.inverse_transform(y_pred.reshape(-1, 1))
@@ -305,19 +326,11 @@ def grid_search_lstm_params(symbol):
     return best_params, best_accuracy
 
 # ============================================================
-# MAIN TRAINING FUNCTION (Choose your method)
+# MAIN TRAINING FUNCTION
 # ============================================================
 
 def train_lstm(symbol, ensemble_method='bagging'):
-    """
-    Train LSTM model with ensemble methods.
-    
-    Methods:
-    - 'standard': Regular LSTM
-    - 'bagging': Bagging ensemble of multiple LSTMs
-    - 'hybrid': LSTM + Gradient Boosting
-    - 'grid_search': Find best parameters first
-    """
+    """Train LSTM model with ensemble methods."""
     symbol = symbol.upper()
     
     cache_key = f"{symbol}_{ensemble_method}"
@@ -329,23 +342,19 @@ def train_lstm(symbol, ensemble_method='bagging'):
     print(f"  🚀 Training {ensemble_method.upper()} model for {symbol}")
     print(f"{'='*50}")
     
-    # Fetch data
     df = fetch_stock_data(symbol)
     print(f"  ✅ Retrieved {len(df)} days of data")
     
     if len(df) < LOOKBACK + 20:
         raise ValueError(f"Insufficient data for {symbol}")
     
-    # Prepare data
     X, y, scaler = prepare_lstm_data(df)
     
-    # Split data
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
     y_train, y_test = y[:split], y[split:]
     
     if ensemble_method == 'standard':
-        # Standard LSTM
         print(f"  🧠 Training standard LSTM...")
         model = build_lstm_model()
         model.fit(X_train, y_train, epochs=EPOCHS, batch_size=16, validation_split=0.1, verbose=1)
@@ -353,14 +362,12 @@ def train_lstm(symbol, ensemble_method='bagging'):
         result_model = model
         
     elif ensemble_method == 'bagging':
-        # Bagging ensemble
         bagging = BaggingLSTM(n_estimators=5)
         bagging.train(X_train, y_train, scaler)
         predictions = bagging.predict(X_test)
         result_model = bagging
         
     elif ensemble_method == 'hybrid':
-        # Hybrid LSTM + Gradient Boosting
         base_lstm = build_lstm_model()
         base_lstm.fit(X_train, y_train, epochs=EPOCHS, batch_size=16, verbose=0)
         
@@ -376,10 +383,8 @@ def train_lstm(symbol, ensemble_method='bagging'):
         result_model = (base_lstm, gb_model)
         
     elif ensemble_method == 'grid_search':
-        # First run grid search
         best_params, _ = grid_search_lstm_params(symbol)
         
-        # Train with best parameters
         print(f"  🧠 Training with optimal parameters...")
         from tensorflow.keras.models import Sequential
         from tensorflow.keras.layers import LSTM, Dense, Dropout
@@ -399,7 +404,6 @@ def train_lstm(symbol, ensemble_method='bagging'):
     else:
         raise ValueError(f"Unknown method: {ensemble_method}")
     
-    # Calculate accuracy
     y_test_real = scaler.inverse_transform(y_test.reshape(-1, 1))
     y_pred_real = scaler.inverse_transform(predictions.reshape(-1, 1))
     accuracy = calculate_directional_accuracy(y_test_real, y_pred_real)
@@ -414,8 +418,8 @@ def train_lstm(symbol, ensemble_method='bagging'):
     trained_models[cache_key] = result
     return result
 
-def predict_price(symbol, ensemble_method='standard'):
-    """Predict next day's price using specified ensemble method."""
+def predict_price(symbol, ensemble_method='bagging'):
+    """Predict next day's price with realistic caps."""
     symbol = symbol.upper()
     
     try:
@@ -443,9 +447,7 @@ def predict_price(symbol, ensemble_method='standard'):
         pred_mean, pred_std = model.predict_single(last_scaled)
         predicted_price = float(scaler.inverse_transform([[pred_mean]])[0][0])
     elif isinstance(model, tuple):
-        # Hybrid model
         base_lstm, gb_model = model
-        # Extract features and predict
         from tensorflow.keras.models import Model
         feature_extractor = Model(inputs=base_lstm.input, outputs=base_lstm.layers[2].output)
         lstm_features = feature_extractor.predict(last_scaled, verbose=0)
@@ -453,18 +455,41 @@ def predict_price(symbol, ensemble_method='standard'):
         pred_gb = gb_model.predict(lstm_features)[0]
         predicted_price = float(scaler.inverse_transform([[(0.7 * pred_lstm + 0.3 * pred_gb)]])[0][0])
     else:
-        # Standard LSTM
         pred_scaled = model.predict(last_scaled, verbose=0)
         predicted_price = float(scaler.inverse_transform(pred_scaled)[0][0])
     
     current_price = float(df["close"].iloc[-1])
-    change_percent = ((predicted_price - current_price) / current_price) * 100
+    original_change = ((predicted_price - current_price) / current_price) * 100
     
-    # Generate suggestion
-    if change_percent > 1.5:
+    # Apply realistic volatility cap
+    max_move = VOLATILITY_LIMITS.get(symbol, VOLATILITY_LIMITS['DEFAULT'])
+    
+    # Calculate recent volatility from last 30 days
+    recent_returns = df["close"].pct_change().tail(30).dropna()
+    if len(recent_returns) > 0:
+        historical_volatility = recent_returns.std() * 100
+        # Use the smaller of: our cap or 2.5x historical volatility
+        dynamic_cap = min(max_move, historical_volatility * 2.5)
+    else:
+        dynamic_cap = max_move
+    
+    if abs(original_change) > dynamic_cap:
+        capped_change = dynamic_cap if original_change > 0 else -dynamic_cap
+        predicted_price = current_price * (1 + capped_change / 100)
+        print(f"  ⚠️  Capped unrealistic move: {original_change:.1f}% → {capped_change:.1f}%")
+        change_percent = capped_change
+    else:
+        change_percent = original_change
+    
+    # Generate suggestion with tight thresholds
+    if change_percent > 1.2:
         suggestion = "BUY"
-    elif change_percent < -1.5:
+    elif change_percent < -1.2:
         suggestion = "SELL"
+    elif change_percent > 0.6:
+        suggestion = "WEAK BUY"
+    elif change_percent < -0.6:
+        suggestion = "WEAK SELL"
     else:
         suggestion = "HOLD"
     
