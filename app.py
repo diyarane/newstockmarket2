@@ -2,10 +2,12 @@ from flask import Flask, render_template, request, jsonify
 import requests
 import yfinance as yf
 from model import predict_price, trained_models
+import os
+from dotenv import load_dotenv
 
 app = Flask(__name__)
 
-ALPHA_VANTAGE_API_KEY = 'A1AP3WSVCIITGGT8'
+ALPHA_VANTAGE_API_KEY = os.getenv('ALPHA_VANTAGE_API_KEY')
 
 # Popular stocks for autocomplete seed list
 POPULAR_SYMBOLS = [
